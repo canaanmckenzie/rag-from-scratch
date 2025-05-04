@@ -1,0 +1,1316 @@
+Intro Knowledge
+
+Large Language Models (LLMs) work by taking a piece of text (e.g. user prompt) and calculating the next word. In more technical terms, tokens. LLMs have a vocabulary, or a dictionary, of valid tokens, and will reference those in training and inference (the process of generating text). More on that below. You need to understand why we use tokens (sub-words) instead of words or letters first. But first, a short glossary of some technical terms that aren't explained in the sections below in-depth:
+Short Glossary
+
+Logits: The raw, unnormalized scores output by the model for each token in its vocabulary. Higher logits indicate tokens the model considers more likely to come next.
+Softmax: A mathematical function that converts logits into a proper probability distribution - values between 0 and 1 that sum to 1.
+Entropy: A measure of uncertainty or randomness in a probability distribution. Higher entropy means the model is less certain about which token should come next.
+Perplexity: Related to entropy, perplexity measures how "surprised" the model is by the text. Lower perplexity indicates higher confidence.
+n-gram: A contiguous sequence of n tokens. For example, "once upon a" is a 3-gram.
+Context window (or sequence length): The maximum number of tokens an LLM can process at once, including both the prompt and generated output.
+Probability distribution: A function that assigns probabilities to all possible outcomes (tokens) such that they sum to 1. Think of it like percentages: if 1% was 0.01, 50% was 0.5, and 100% was 1.0.
+Why tokens?
+
+Your first instinct might be using a vocabulary of words or letters for an LLM. But instead, we use sub-words: some common words are preserved as whole in the vocabulary (e.g. the, or apple might be a single token due to how common they are in the English language), but others are fragmented into common sub-words (e.g. bi-fur-cat-ion Why is this? There are several, very good reasons:
+Why not letters?
+
+Many reasons. To name a few: LLMs have a limited context window (amount of tokens it can process at once). With character-level tokenization, even a moderate amount of text would lead to sequence length explosion (too many tokens for too little text). The word tokenization would be 12 tokens instead of, for example, 2 or 3 in a sub-word system. Longer sequences also require much more computation for self-attention. But more importantly, the model would need to learn higher-level patterns spanning a lot more positions. Understanding that t-h-e represents a single concept requires connecting information across three positions instead of one. This may also lead to meaningful relationships becoming more distant. Related concepts might be dozens or hundreds of positions apart.
+Why not whole words?
+
+A pure world-level tokenization would need us to create a vocabulary spanning the entire possible word list in the English language, and if we're doing multiple languages, then many times that. This would make our embedding matrix unreasonably large and expensive. It would also struggle with new or rare words. When a model encounters a word not in its vocabulary, it typically replaces it with an "unknown" token, losing virtually all semantic information. Sub-word tokenization would represent new words by combining existing subword tokens. For example, if we invent a new word called "grompuficious", a sub-word tokenizer might represent it as g-romp-u-ficious, depending on the tokenizer.
+Another thing to mention is morphological awareness: many languages create words by combining morphemes (prefixes, roots, suffixes). E.g., as demonstrated earlier, unhappiness can be broken into un-happi-ness; sub-word tokenization can naturally capture these relationships. It also allows us to perform cross-lingual transfer. For languages with complex morphology or compounding (e.g. German or Finnish where words can be extremely long combinations).
+How are the sub-words chosen?
+
+If a language model uses a new tokenizer, the development team may decide to take a representative sample of their training data, and train a tokenizer to find the most commond sub-words in the dataset. They will set a vocabulary size beforehand, and then the tokenizer will try and find enough sub-words to fill up the list.
+How does the model generate text?
+
+During training, the model sees many terabytes worth of text and builds an internal probability map for tokens. For example, after it's seen the tokens for How are are usually followed by the tokens you?, it will learn that to be the most probable next set of tokens. Once this map has been built internally to a satisfactory degree, the training is stopped and a checkpoint is released to the public (or kept private and served from an API, e.g. OpenAI). During inference, the user will provide the LLM with a text, and the LLM, based on the probabilities it's learned through training, will decide what token comes next. However, it will not decide just one token: it will take into consideration every possible token that exists in its vocabulary, assigns a probability score to each, and (depending on your sampler) will only output the most probable token, i.e. the one with the highest score. This would make for a rather boring output (unless you need determinism), so this is where Sampling comes in.
+From Tokens to Text: How LLMs Generate Content
+
+Now that we understand how LLMs break down and represent text using tokens, let's explore how they actually generate content. The process of text generation in LLMs involve two key steps:
+
+    Prediction: For each position, the model calculates the probability distribution over all possible next tokens in its vocabulary.
+    Selection: The model must choose one token from this distribution to add to the growing text.
+
+The first step is fixed - determined by the model's parameters after training. However, the second step - token selection - is where sampling occurs. While we could simply always choose the most likely token (known as "greedy" sampling), this tends to produce repetitive, deterministic text. Sampling introduces controlled randomness to make outputs more varied.
+Sampling
+
+As explained above, LLMs will pick the most probable token to generate. Sampling is the practice of introducing controlled randomness. With pure "greedy" sampling, it would pick the #1 option every time, but that's boring! We use sampling methods like temperature, penalties, or truncation to allow for a bit of creative variation. This document will go through every popular sampling method, and explains how all of them word; both from a simple-to-understand and technical perspectives.
+Notes on Algorithm Presentations
+
+Throughout this document, algorithms are presented in pseudo-code format that combines mathematical notation with programming concepts. Here are some guidelines to help interpret these:
+Notation Guide
+
+    L: the logits tensor (raw scores output by the model)
+    P: probabilities (after applying softmax to logits)
+    ←: assignment operation (equal to = in programming)
+    ∑: summation
+    |x|: either absolute value or length/size of x, depending on context
+    x[i]: accessing the i-th element of x
+    v: logical OR operation
+    ¬: logical NOT operation
+    ∞: infinity (often used to mask out tokens by setting logits to negative infinity)
+    argmax(x): returns the index of the maximum value in x
+    ∈: "element of" (e.g., x ∈ X means x is an element of set X)
+
+Implementation Considerations
+
+The algorithms provided are written for clarity rather than optimization. Production implementations would typically:
+
+    Vectorize operations where possible for efficiency
+    handle edge cases and numerical stability issues (though parts that need this have occasionally been highlighted in the algorithms below)
+    Incorporate batch processing for multiple sequences, if necessary for the framework
+    Cache intermediate results where beneficial
+
+Temperature
+
+Think of this as the "creativity knob" on your LLM. At low temperatures (close to 0), the model becomes very cautious and predictable - it almost always picks the most likely next word. It's like ordering the same dish at your favourite restaurant every time because you know you'll like it (or maybe you don't know any better). At higher temperatures (like 0.7-1.0), the model gets very creative and willing to take chances. It may choose the 3rd or 4th most likely word instead of always the top choice. This makes text more varied and interesting, but also increases the chance of errors. Very high temperatures (above 1.0) make the model wild and unpredictable, unless you use it in conjunction with other sampling methods (e.g. min-p) to reign it in.
+
+Technical:
+Temperature works by directly manipulating the probability distribution over the vocabulary. The model produces logits (unnormalized scores) for each token in the vocabulary, which are then divided by the temperature value. When temperature is less than 1, this makes high logits relatively higher and low logits relatively lower, giving us a more peaked distribution where the highest-scoring tokens become even more likely. When temperature exceeds 1, this flattens the distribution, making the probability gap between high and low scoring tokens smaller, thus increasing randomness. After applying temperature, the modified logits are converted to a probability distribution (using softmax) and a token is randomly sampled from this distribution. The mathematical effect is that Temperature T transformers probabilities by essentially raising each probability to the power of 1/T before renormalizing.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+	
+
+Algorithm 1 Temperature Sampling
+Required: Logits tensor L, temperature parameter T
+Output: Modified logits with adjusted probability distribution
+1: T ← max(T, ε)  // Prevent numerical issues with extremely low temperatures
+2: if T < 0.1 then
+3:     L ← L - max(L) + 1  // Shift range to [-inf, 1] for numerical stability
+4: end if
+5: L ← L / T  // Apply temperature scaling
+6: return L
+
+Presence Penalty
+
+This discourages the model from repeating any token that has appeared before, regardless of how many times it's been used. Think of it like a party host who wants to make sure everyone gets a turn to speak. If Tim has already spoken once, he gets slightly discouraged from speaking again, whether he spoke once or ten times before. This is generally not recommend, since better penalty strategies exist (see: DRY).
+
+Technical:
+Presence Penalty works by applying a fixed penalty to any token that has appeared in the generated text. We first identify which tokens have been used before using the output mask (which is True for tokens that appear at least once). It then subtracts the presence penalty value from the logits to those tokens. This makes previously used tokens less likely to be selected again, regardless of how frequently they've appeared. The penalty is applied uniformly to any token that has been used at least once.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+
+	
+
+Algorithm 2 Presence Penalty
+Required: Logits tensor L, output tokens O, penalty weight λp
+Output: Modified logits with penalty applied for token presence
+1: Vsize ← |L[0]|  // Vocabulary size from logits dimension
+2: Moutput ← BinaryMask(O, Vsize)  // Create binary mask where token has appeared at least once
+3: P ← λp · Moutput  // Calculate penalty matrix
+4: L ← L - P  // Apply presence penalty to logits
+5: return L
+
+Frequency Penalty
+
+Discourages tokens based on how many times they've already been used. This is simply Presence Penalty but with the number of occurrences being taken into account. The more frequently a word has appeared, the less likely it will appear again.
+
+Technical:
+The frequency penalty multiplies the count of each token's previous occurrences by the penalty value and subtracts this from that token's logit score. We track how many times each token has appeared in the generated output, and if it's appeared three times, its logit is reduced 3 x (frequency penalty). This creates a progressive penalty that increases with each repeated use of a token.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+
+	
+
+Algorithm 3 Frequency Penalty
+Required: Logits tensor L, output tokens O, penalty weight λf
+Output: Modified logits with penalty applied proportional to token frequency
+1: Vsize ← |L[0]|  // Vocabulary size from logits dimension
+2: Coutput ← TokenCounts(O, Vsize)  // Count occurrences of each token in output
+3: P ← λf · Coutput  // Calculate penalty matrix proportional to counts
+4: L ← L - P  // Apply frequency penalty to logits
+5: return L
+
+Repetition Penalty
+
+The repetition penalty works a bit differently from the other two: it penalizes both tokens from the prompt and generated output, affecting positive and negative logits differently. For positive scores, it divides the score by the penalty (making it smaller); for negative scores, it multiplies by the penalty (making it more negative). Useful for breaking out of loops, with the cost of coherency at more aggressive values.
+
+Technical:
+The penalty is applied to tokens that have appeared in either prompt or the generated text so far. We create a mask combining both prompt and output masks. for tokens in this combined mask, we apply the penalty by either dividing or multiplying the logits depending on whether they're positive or negative. This approach avoids over-penalizing already unlikely tokens while effectively reducing the probability of tokens with higher scores. The most distinctive feature is its different treatment of positive and negative logits, which helps maintain a more balanced probability distribution.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+
+	
+
+Algorithm 4 Repetition Penalty
+Required: Logits tensor L, prompt tokens P, output tokens O, penalty factor λr
+Output: Modified logits with asymmetric penalty for repeated tokens
+1: Vsize ← |L[0]|  // Vocabulary size from logits dimension
+2: Mprompt ← BinaryMask(P, Vsize)  // Create binary mask for tokens in prompt
+3: Moutput ← BinaryMask(O, Vsize)  // Create binary mask for tokens in output
+4: M ← Mprompt ∨ Moutput  // Combined mask for tokens in either prompt or output
+5: R ← matrix of size |L| × Vsize filled with λr
+6: R[¬M] ← 1.0  // No penalty for tokens not previously seen
+7: for each position (i,j) in L do
+8:     if L[i,j] > 0 then
+9:         L[i,j] ← L[i,j] / R[i,j]  // Divide positive logits
+10:     else
+11:         L[i,j] ← L[i,j] * R[i,j]  // Multiply negative logits
+12:     end if
+13: end for
+14: return L
+
+DRY (Don't Repeat Yourself)
+
+DRY sampling is like having an editor who watches for repetitive patterns in your writing. Let's say you're writing a story and you've already used the phrase "once upon a time" - DRY will discourage you from using that exact same phrase again. But it's much smarter than simple word repetition prevention (like the 3 penalties above).
+
+DRY looks for repeating patterns (called n-grams) in your text. If it notices you've written something like "the cat sat on the" before and you're about to repeat this pattern, it discourages the next word that would continue the repetition. The longer the repeating pattern, the stronger the discouragement. This prevents the text from falling into loops or recycling the same phrases and keeps the output fresh and varied. What makes DRY special is that it considers existing patterns. It's particularly useful for creative writing where repetitive text would sound unnatural.
+
+Technical:
+DRY sampling works by detecting n-gram repetitions and penalizing tokens that would continue these patterns. The algorithm examines the sequence of tokens generated so far and identifies repeating patterns that end with the most recently generated token. We track where the last token appears elsewhere in the text, then compares the contexts before these appearances. When it finds matching contexts (repeated n-grams), it identifies which tokens followed these patterns previously and penalizes them in the current logits distribution. Key parameters include the multiplier (strength of the penalty), base (how much stronger the penalty becomes for longer n-grams), minimum n-gram length to consider, and maximum n-gram length to check. The algorithm also respects "sequence breakers" (like punctuation) that reset pattern matching, and has range limits to only consider recent text for efficiency.
+
+The penalty is applied exponentially based on the length of the matching pattern, with longer matches receiving stronger penalties. This creates a dynamic system that prevents repetition while still allowing natural text flow, making output text more diverse and human-like by avoiding the repetitive patterns that often plague language models.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+
+	
+
+Algorithm 5 DRY (Don't Repeat Yourself) Sampling
+Required: Logits tensor L, input tokens I, output tokens O, multiplier λ, base b, 
+         minimum n-gram length Nmin, sequence breaker tokens B, range limit r,
+         maximum n-gram length Nmax, maximum occurrences M, early exit threshold E
+Output: Modified logits with penalties for repeating patterns
+
+1: for each sequence s where λ > 0 do
+2:     // Prepare token sequence by concatenating prompt and generated tokens
+3:     p ← Length of valid tokens in I[s]
+4:     q ← Length of valid tokens in O[s]
+5:     T ← Concatenate(I[s][1:p], O[s][1:q])
+6:
+7:     if r > 0 then
+8:         T ← T[-r:]  // Consider only the last r tokens if range limit is set
+9:     end if
+10:
+11:     if |T| < 2 then continue end if  // Skip if sequence too short
+12:
+13:     last ← T[-1]  // Last token in sequence
+14:     if last ∈ B then continue end if  // Skip if last token is a sequence breaker
+15:
+16:     // Create mask for sequence breaker positions
+17:     breakMask ← ZeroVector(|T|)
+18:     for each token id b ∈ B do
+19:         breakMask ← breakMask ∨ (T = b)
+20:     end for
+21:
+22:     // Find maximum allowed n-gram length before hitting a sequence breaker
+23:     maxN ← 0
+24:     for i from 1 to min(|breakMask|, Nmax) do
+25:         if breakMask[-i] then break end if
+26:         maxN ← i
+27:     end for
+28:
+29:     if maxN ≤ Nmin then continue end if  // Skip if maximum n-gram too short
+30:
+31:     // Initialize array to track longest matching n-gram for each token
+32:     ngramLengths ← ZeroVector(VocabularySize)
+33:
+34:     // Find all positions where the last token appears
+35:     endpoints ← FindIndices(T = last)
+36:     if |endpoints| < 2 then continue end if
+37:
+38:     // Remove the last occurrence (current position)
+39:     endpoints ← endpoints[:-1]
+40:
+41:     // Limit number of previous occurrences to check
+42:     if |endpoints| > M then
+43:         endpoints ← endpoints[-M:]
+44:     end if
+45:
+46:     // Check each previous occurrence of the last token for matching contexts
+47:     for each idx in Reverse(endpoints) do
+48:         if idx = |T| - 1 then continue end if
+49:
+50:         matchLen ← 0
+51:         // Look backward to find matching context
+52:         for u from 1 to min(idx, maxN) do
+53:             if breakMask[idx - u] then break end if
+54:             if T[idx - u] ≠ T[-u - 1] then break end if
+55:             matchLen ← u
+56:         end for
+57:
+58:         if matchLen > 0 then
+59:             nextToken ← T[idx + 1]  // Token that followed this pattern before
+60:             newLen ← matchLen + 1
+61:             ngramLengths[nextToken] ← max(ngramLengths[nextToken], newLen)
+62:             
+63:             if newLen ≥ E then break end if  // Early exit if match is long enough
+64:         end if
+65:     end for
+66:     
+67:     // Apply penalties to tokens that would continue repeating patterns
+68:     penaltyMask ← (ngramLengths > 0)
+69:     if any(penaltyMask) then
+70:         scales ← b ^ (ngramLengths[penaltyMask] - Nmin)  // Exponential scaling by pattern length
+71:         L[s][penaltyMask] ← L[s][penaltyMask] - λ * scales
+72:     end if
+73: end for
+74: return L
+
+Top-K
+
+Instead of considering all possible next words (which could be tens of thousands), the model narrows down to only the K most likely candidates. If K is 40, the model will only choose from the top 40 most likely next words. This approach prevents the model from selecting extremely unlikely words while still maintaining some randomness.
+
+Technical:
+This method works by sorting the logits for all possible next tokens and keeping only the K highest values while setting all others to negative infinity. We first sort the logits in ascending order and get their indices. Then, we identify the Kth highest value and create a mask for all values below this threshold. Any logit below this threshold is set to -inf, ensuring these tokens have effectively zero probability after applying softmax. The filtered logits are then returned to their original order using the saved indices.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+	
+
+Algorithm 6 Top-K Sampling
+Required: Logits tensor L, parameter k
+Output: Modified logits with all but top-k options filtered out
+1: Lsorted, Lidx ← Sort(L, descending=False)  // Sort logits in ascending order
+2: kth ← Lsorted[|Lsorted| - k]  // Find the kth largest logit value
+3: mask ← Lsorted < kth  // Create mask for values below the threshold
+4: Lsorted[mask] ← -∞  // Filter out tokens below threshold
+5: L ← Unsort(Lsorted, Lidx)  // Restore original ordering
+6: return L
+
+Top-P
+
+Instead of picking a fixed number of options like Top-K, Top-P selects the smallest set of words whose combined probability exceeds threshold P. It's like saying "I'll only consider dishes that make up 90% of all orders at this restaurant." If P is 0.9, the model includes just enough of the highest-probability words to reach 90% cumulative probability, whether that's 5 words or 500. In situations where the model is very confident, it might only need a few options, but when uncertainty is high, it can consider more possibilities.
+
+Technical:
+Top-P works by selecting the smallest set of tokens whose cumulative probability exceeds the threshold P. After applying Top-K filtering, we convert logits to probabilities using softmax and calculates their cumulative sum in ascending order. It then creates a mask identifying tokens where the cumulative probability is still below 1-P (i.e. these tokens aren't part of the "nucleus" that makes up P of the total probability mass). These tokens are masked out by setting their logits to -inf. We need to ensure that at least one token remains viable by always keeping the highest-probability token (setting its mask to False). Finally, the filtered logits are returned to their original order using the saved indices from the initial sorting.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+
+	
+
+Algorithm 7 Top-P (Nucleus) Sampling
+Required: Logits tensor L, probability threshold p ∈ [0,1]
+Output: Modified logits with smallest probability tokens filtered out
+1: Lsorted, Lidx ← Sort(L, descending=False)  // Sort logits in ascending order
+2: Psorted ← Softmax(Lsorted)  // Convert to probabilities
+3: Pcum ← CumulativeSum(Psorted)  // Calculate cumulative probabilities
+4: mask ← Pcum ≤ (1 - p)  // Create mask for tokens below threshold
+5: mask[|mask| - 1] ← False  // Always keep at least one token
+6: Lsorted[mask] ← -∞  // Filter out tokens below threshold
+7: L ← Unsort(Lsorted, Lidx)  // Restore original ordering
+8: return L
+
+Min-P
+
+Min-P sets a quality threshold relative to these best option. Using the restaurant analogy again, imagine you're at a restaurant with your friend who always orders the most popular dish. You decide you'll only consider dishes that are at least 20% as popular as their top choice. If the most popular dish gets ordered 100 times a day, you set Min-P to 0.2, you'll only consider dishes ordered at least 20 times a day. When the model is very confident about the best choice, the threshold becomes higher, and fewer alternatives are considered. When the model is uncertain, more alternatives pass the threshold.
+
+Min-P is usually used in conjunction with higher temperature values (1.0-1.2), and used in very low values (0.1).
+
+Technical:
+Min-P filters out tokens whose probabilities fall below a certain fraction of the highest probability token. We first convert logits to probabilities using softmax and identify the maximum probability value for each sequence. Then, create a threshold by multiplying this maximum probability by the Min-P value. For example, if the highest probability is 0.6 and Min-P is 0.1, the threshold would be 0.06.
+
+Any token with a probability below this threshold is masked out by setting its logit to -inf. This creates a dynamic filtering mechanism where the cutoff adapts to the confidence level of the model for each prediction. Min-P doesn't require sorting the entire vocabulary like Top-K or Top-P, so it ends up being more efficient as well.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+	
+
+Algorithm 8 Min-P Sampling
+Required: Logits tensor L, threshold fraction min_p ∈ [0,1]
+Output: Modified logits with low probability tokens filtered out
+1: P ← Softmax(L)  // Convert logits to probabilities
+2: Pmax ← Max(P)  // Find maximum probability
+3: threshold ← min_p × Pmax  // Calculate dynamic threshold
+4: mask ← P < threshold  // Create mask for tokens below threshold
+5: L[mask] ← -∞  // Filter out tokens below threshold
+6: return L
+
+Top-A
+
+This one applies a filter that gets stricter when the model is more confident. Top-A creates a threshold that's proportional to the square of the highest probability token. When the model is very confident, the threshold becomes much higher due to the squaring effect, dramatically limiting options only to the very best alternatives. When the model is less confident, the threshold drops more rapidly.
+
+Technical:
+
+Top-A is essentially if min-p was squared instead of linear. Note that Top-A predates Min-P.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+	
+
+Algorithm 9 Top-A Sampling
+Required: Logits tensor L, parameter a
+Output: Modified logits with options below squared threshold filtered out
+1: P ← Softmax(L)  // Convert logits to probabilities
+2: Pmax ← Max(P)  // Find maximum probability
+3: threshold ← Pmax² × a  // Calculate squared threshold
+4: mask ← P < threshold  // Create mask for tokens below threshold
+5: L[mask] ← -∞  // Filter out tokens below threshold
+6: return L
+
+XTC (eXclude Top Choices)
+
+XTC works by occasionally excluding the most likely option based on two parameters: a probability of activation, and a threshold for determining which choices to exclude. When XTC activates (based on random chance), it looks at all the top choices whose probabilities exceed the threshold and removes all but the lowest-scoring one among them.
+
+This forces the model to occasionally "think outside the box" and select words it wouldn't normally. Unlike other samplers that just filter out unlikely options, XTC specifically targets the most predictable choices.
+
+Technical:
+XTC occasionally excludes the most likely token from consideration, keeping only the least likely token among those that exceed a specified threshold. We first determine whether to apply XTC for each sequence based on a random draw against the specified probability. For sequences where XTC activates, we convert logits to probs, sort them in descending order, and identify tokens whose probabilities exceed the threshold (skipping the very top choices initially). If tokens above the threshold are found, we count how many tokens qualify (including the top choice that was initially skipped). We then mask out all these high-prob tokens except for the last/lowest one in the sorted list. This effectively removes the most obvious choices. You can call this sampler a contrarian.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+
+	
+
+Algorithm 10 XTC (eXclude Top Choices) Sampling
+Required: Logits tensor L, threshold t, activation probability p
+Output: Modified logits with top choices filtered out except for the lowest-scoring one
+1: apply ← RandomBernoulli(p)  // Determine which sequences to apply XTC to
+2: if not any(apply) then return L end if
+3:
+4: P ← Softmax(L)  // Convert logits to probabilities
+5: Psorted, Pidx ← Sort(P, descending=True)  // Sort probabilities in descending order
+6:
+7: for each sequence i where apply[i] = True do
+8:     // Find tokens above threshold (starting from second-highest)
+9:     aboveThreshold ← Psorted[i, 1:] ≥ t
+10:
+11:     // Count how many tokens qualify (including the top one)
+12:     count ← Sum(aboveThreshold) + 1
+13:
+14:     if count > 1 then
+15:         // Get indices of the high-probability tokens to remove
+16:         tokensToRemove ← Pidx[i, 0:count-1]
+17:
+18:         // Mask out all high-probability tokens except the lowest-scoring one
+19:         L[i, tokensToRemove] ← -∞
+20:     end if
+21: end for
+22:
+23: return L
+
+Top-N-Sigma
+
+This one sets a statistical quality bar for word choices. Think of it like selecting players for a sports team and decide to take anyone who scores within 2 standard deviations of the top performer.
+
+The sampler uses basic statistics to create a more adaptive threshold. It looks at how spread out (standard deviation) the scores for all possible next words are, then sets a cutoff at N standard deviations below the highest-scoring word. In situations where the model has a few very strong preferences and many mediocre options, the standard deviation will be small, creating a stricter threshold. But when there are many similarly good options, the standard deviation increases. Essentially, when the model is certain about a few good choices, it stays focused on those. When there are multiple reasonable options (like in creative writing), it allows for more variety without including truly poor choices.
+
+Technical:
+Top-N-Sigma creates a threshold based on statistical properties of the distribution of logits, specifically the maximum value and standard deviation. We calculate the standard deviation of logits across the vocabulary for each sequence. Then, set a threshold by subtracting N times this standard deviation from the maximum logit value. any logit below this threshold is set to -inf. The approach is mathematically elegant because it adapts to the shape of the distribution rather than just its absolute values. In distributions with high variance, the threshold will be lower, allowing more tokens in. It accounts for both the absolute best score and the overall distribution of scores.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+	
+
+Algorithm 11 Top-N-Sigma Sampling
+Required: Logits tensor L, parameter n (number of standard deviations)
+Output: Modified logits with values below statistical threshold filtered out
+1: σ ← StandardDeviation(L)  // Calculate standard deviation of logits across vocabulary
+2: Lmax ← Max(L)  // Find maximum logit value
+3: threshold ← Lmax - n × σ  // Calculate threshold n standard deviations below maximum
+4: mask ← L < threshold  // Create mask for tokens below threshold
+5: L[mask] ← -∞  // Filter out tokens below threshold
+6: return L
+
+Tail-Free Sampling
+
+TFS is like looking at the slope change in a graph of word probabilities and cutting it off where there's a significant drop. For example, you're lining up candidates for a job based on their scores - instead of using a fixed cutoff, you look for where there's a big gap between consecutive scores and say "everyone past this point is significantly worse."
+
+TFS examines how the probability distribution changes by looking at second derivatives (the "curvature" or rate of change in the slope). It focues on points where the distribution starts to flatten out, marking the transition from "good" candidates to "the long tail of mediocre options." What makes it special is that it adapts to the natural structure of the distribution rather than imposing arbitrary thresholds. It finds the "elbow point" where good options end and the less relevant ones begin.
+
+Technical:
+TFS works by analyzing the curvature of the probability distribution to identify where the "tail" begins. We first sort the logits in descending order and convert them to probs. Then, calculate the absolute value of the second derivative (diff().diff().abs()), which captures how quickly the slope of the probability distribution changes. This identifies points where there are significant kinks in the curve - often indicating the transition between meaningful tokens and the long tail. The second derivatives are normalized to create a probability distribution of the curvature, and a cumulative distribution function (CDF) is calculated. The TFS parameter serves as a threshold on this CDF - when the cumulative curvature exceeds the threshold, tokens beyond that point are masked out. Of course, there needs to be boundary conditions to make sure at least one token always remains viable, and finally, return filtered logits to their original order.
+
+TFS ultimately focues on the shape of the distribution rather than absolute values.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+
+	
+
+Algorithm 12 Tail-Free Sampling (TFS)
+Required: Logits tensor L, threshold t ∈ [0,1]
+Output: Modified logits with "tail" of distribution filtered out
+1: Lsorted, Lidx ← Sort(L, descending=True)  // Sort logits in descending order
+2: P ← Softmax(Lsorted)  // Convert to probabilities
+3: D1 ← Diff(P)  // First differences (slope)
+4: D2 ← |Diff(D1)|  // Absolute second differences (change in slope)
+5: D2norm ← D2 / Sum(D2)  // Normalize curvature
+6: CurvatureCDF ← CumulativeSum(D2norm)  // Cumulative distribution of curvature
+7: mask ← CurvatureCDF > t  // Create mask where curvature CDF exceeds threshold
+8: // Add boundary conditions (keep top token, mask after end of vocabulary)
+9: mask ← Concatenate([False], mask, [True])
+10: Lsorted[mask] ← -∞  // Filter out tokens in the "tail"
+11: L ← Unsort(Lsorted, Lidx)  // Restore original ordering
+12: return L
+
+Eta Cutoff
+
+Eta Cutoff adapts to how certain or uncertain the model is. Using the previous analogy again, let's say you have a stack of resumes. If there's one clearly outstanding candidate, you might be very selective about who else gets an interview. But if all candidates are similarly qualified, you might interview more of them. Eta cutoff works on this principle by looking at both the individual probability of each word and the overall entropy (uncertainty) of the distribution. When the model is very certain about what comes next (low entropy), the cutoff threshold becomes stricter, keeping only the most probable options. When the model is uncertain (high entropy), the threshold becomes more lenient.
+
+Technical:
+We create a dynamic probability threshold that considers both the eta parameter and the entropy of the distribution. We calculate logprobs and then compute the negative entropy (perplexity) of the distribution. Then, determine the threshold (eps) as the minimum between eta and a function of eta modified by entropy: sqrt(eta) * exp(neg_entropy). This creates a dynamic threshold for us that decreases when entropy is high and vice versa.
+
+Any token with a probability below this threshold is masked out.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+
+	
+
+Algorithm 13 Eta Cutoff Sampling
+Required: Logits tensor L, parameter η ∈ (0,1)
+Output: Modified logits with dynamic low-probability filtering
+1: LN ← LogSoftmax(L)  // Log-normalized logits
+2: P ← Exp(LN)  // Convert to probabilities
+3: H ← -Sum(P × LN)  // Calculate negative entropy (higher means more certainty)
+4: threshold ← Min(η, √η × Exp(H))  // Dynamic threshold based on certainty
+5: mask ← P < threshold  // Create mask for tokens below threshold
+6: topIdx ← ArgMax(P)  // Find index of highest probability token
+7: mask[topIdx] ← False  // Always keep highest probability token
+8: L[mask] ← -∞  // Filter out tokens below threshold
+9: return L
+
+Epsilon Cutoff
+
+Like setting a minimum vote threshold in an election - any candidate who doesn't get at least a certain percentage of votes is eliminated. Basically a simpler version of filtering that removes all options below a fixed probability threshold.
+
+It's a straightforward approach that removes extremely unlikely words without affecting the relative probabilities of the remaining options. It's useful for cleaning up the long tail of improbable tokens that might otherwise occasionally be selected due to random chance. Not as adaptive as other methods, but it's simple and predictable, and removes undesirables without dramatically changing the distribution's shape.
+
+Technical:
+A fixed probability threshold to eliminate unlikely tokens. Convert logits to probs using softmax, create a mask identifying tokens whose probabilities fall below the epsilon threshold. Any token below this threshold has its logits set to negative infinity.
+
+its difference with eta cutoff is that epsilon uses a fixed threshold regardless of the distribution's properties. Both methods are ultimately a way to prune the vocabulary space without complex sorting operations, which may make inference slower.
+
+Algorithm
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+	
+
+Algorithm 14 Epsilon Cutoff Sampling
+Required: Logits tensor L, threshold ε ∈ (0,1)
+Output: Modified logits with fixed low-probability filtering
+1: P ← Softmax(L)  // Convert logits to probabilities
+2: mask ← P < ε  // Create mask for tokens below fixed threshold
+3: topIdx ← ArgMax(P)  // Find index of highest probability token
+4: mask[topIdx] ← False  // Always keep highest probability token
+5: L[mask] ← -∞  // Filter out tokens below threshold
+6: return L
+
+Locally Typical Sampling
+
+This sampler is like focusing on the most "average" word choices rather than the most probable ones. Like you're writing a story and want it to sound natural but not predictable. Instead of always picking the most obvious words or completely random ones, you'd choose words that are neither too surprising nor too boring — words that feel "typically human."
+
+The method itself works by measuring how much each potential word deviates from the average surprisal (unexpectedness) of all options. Words that are extremely predictable or extremely surprising are considered less "typical" than those with middle-of-the-road surprisal values. Typical sampling keeps tokens whose surprisal is close to the average, and might make the text feel more "balanced." It doesn't look at raw probabilities but at how predictable each word is within the context.
+
+Technical:
+Typical sampling selects tokens based on how close their "surprisal" (negative logprob) is to the average surprisal across all tokens. Calculate logprobs and then compute the negative entropy. For each token, calculate the absolute difference between its surprisal and this average — this is the "surprisal deviation" that measures how typical or atypical each token is. Tokens are then sorted by their surprisal deviation (most typical to least typical). The typical-p parameter determines what portion of the cumulative probability mass to keep.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+
+	
+
+Algorithm 15 Locally Typical Sampling
+Required: Logits tensor L, threshold p ∈ [0,1]
+Output: Modified logits with tokens furthest from mean surprisal filtered out
+1: LN ← LogSoftmax(L)  // Log-normalized logits
+2: P ← Exp(LN)  // Convert to probabilities
+3: H ← Sum(P × LN)  // Calculate negative entropy (expected surprisal)
+4: S ← |H - LN|  // Calculate surprisal deviation for each token
+5: Sidx ← ArgsortAscending(S)  // Sort indices by surprisal deviation (most typical first)
+6: Preordered ← GatherByIndices(P, Sidx)  // Reorder probabilities by typicality
+7: Pcum ← CumulativeSum(Preordered)  // Calculate cumulative sum of reordered probabilities
+8: maskSorted ← Pcum ≥ p  // Create mask where cumulative typical probability exceeds threshold
+9: maskSorted[0:MinTokensToKeep] ← False  // Always keep at least MinTokensToKeep tokens
+10: mask ← ScatterByIndices(maskSorted, Sidx)  // Restore original ordering of mask
+11: L[mask] ← -∞  // Filter out tokens that are least typical
+12: return L
+
+Quadratic Sampling
+
+Whereas most sampling techniques either filter out tokens (like Top-K) or simply adjust randomness (like Temperature), Quadratic Sampling takes a more nuanced approach by reshaping the entire probability distribution using mathematical transformations.
+
+Quadratic works by applying a mathematical transformation that adjusts the gap between high and low prob tokens using quadratic and cubic equations (it was actually called Cubic sampling before the quadratic function was added later). The transformation is centered around the highest-scoring token, with two key params controlling the effect: the smoothing factor determines the overall strength of the adjustment, while the smoothing curve controls the shape of the transformation. It can essentially make the highest probability tokens more prominent while gently supressing the lower ones, or it can flatten the distribution to give more tokens a chance.
+
+Technical:
+Quadratic transforms the logits using a combination of quadratic and cubic terms. We calculate two coefficients: k and s, derived from the smoothing factor and curve params. Those coefficients control the balance between quadratic and cubic terms in the transformation. For each affected sequence, we identify the maximum logit value and calculate the difference between each logit and this maximum. Then, apply a transformation that adjusts this based on the quadratic equation: diff -= diff²(s·diff - k). This creates a non-linear adjustment that varies depending on how far each logit is from the maximum. Because of that, the highest probability token is unchanged while others are adjusted relative to it. When s is positive, the cubic term increases the contrast between high and low logits (making the distribution more peaked). When k is positive, the quadratic term works to flatten the distribution.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+
+	
+
+Algorithm 16 Quadratic Sampling
+Required: Logits tensor L, smoothing factor α, smoothing curve β
+Output: Modified logits with non-linear transformation applied
+1: // Calculate coefficients for quadratic and cubic terms
+2: k ← α × (3 - β) / 2  // Quadratic coefficient
+3: s ← α × (β - 1) / 2  // Cubic coefficient
+4:
+5: // Apply transformation only where smoothing factor is non-zero
+6: mask ← (α ≠ 0)
+7: if not any(mask) then return L end if
+8:
+9: Ltarget ← L[mask]  // Select logits to transform
+10: Lmax ← Max(Ltarget)  // Find maximum logit value
+11: 
+12: // Calculate differences from maximum and apply transformation
+13: Δ ← Ltarget - Lmax  // Distance from maximum logit
+14:
+15: // Apply quadratic transformation: Δ -= Δ²(s·Δ - k)
+16: Δnew ← Δ - (Δ² × (s × Δ - k))
+17:
+18: // Handle potential numerical issues
+19: Δnew[isNaN(Δnew)] ← 0
+20:
+21: // Apply transformed differences
+22: L[mask] ← Ltarget - Δnew
+23:
+24: return L
+
+Mirostat Sampling
+
+Mirostat is like an adaptive thermostat for text generation that automatically adjusts to maintain a consistent level of "surprise" or unpredictability. Just as a thermostat keeps your room temperature stable by turning heating on and off, Mirostat keeps text generation at a consistent level of unpredictability by dynamically adjusting how conservative or creative the sampling is. It works by measuring the "surprisal" (how unexpected each token is) and comparing it to a target value. If recent text has been to predictable, Mirostat allows more surprising tokens to be selected. If it's been too chaotic, Mirostat tightens the constraints to focus on more predictable ones. This creates a feedback loop that maintains a consistent perplexity throughput the generated text.
+
+Mirostat's main selling point is that it's self-regulating, adapting to different contexts without requiring manual parameter adjustment.
+
+Technical:
+Mirostat works as an adaptive token filtering method with a feedback control loop to maintain consistent perplexity.
+
+The core algorithm has two main phases:
+
+    Filtering phase:
+
+    Calculate the "surprisal" (negative logprob, converted to bits) for each potential token.
+    Use an adaptive threshold ("mu") to filter out tokens that are too surprising.
+    Ensure at least one token (the most likely) remains available for selection.
+    Effectively create a dynamic Top-K filter where K varies based on the current mu value.
+
+    Update phase:
+
+    After a token is selected, calculate the actual surprisal of the chosen token.
+    Compare this surprisal to a target value ("tau").
+    Update the mu threshold based on the difference between actual and target surprisal.
+    An eta parameter controls how quickly mu adjusts (learning rate).
+
+The mathematical foundation is a control system using the equation mu_{t+1} = mu_t - η × (surprisal_t - τ)
+
+Where:
+
+    mu is the adaptively changing surprisal threshold
+    τ (tau) is the target surprisal (perplexity)
+    η (eta) is the learning rate
+    surprisal_t is the surprisal of the chosen token
+
+This gives us a negative feedback loop that pushes generation towards the target surprisal level. If tokens are too surprising, mu decreases. If tokens are too precitable, mu increases. This sampling method is likely the most sophisticated and complex to exist.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+
+	
+
+Algorithm 17 Mirostat v2 Sampling
+Required: Logits tensor L, mu parameter (surprisal threshold), 
+          tau parameter (target surprisal), eta parameter (learning rate)
+Output: Modified logits with dynamic filtering based on surprisal control
+
+// Phase 1: Filter tokens based on current surprisal threshold
+1: LN ← LogSoftmax(L)  // Log-normalized logits
+2: S ← -LN / log(2)  // Convert to surprisal in bits
+3: mask ← S > μ  // Create mask for tokens with surprisal exceeding threshold
+4: topIdx ← ArgMax(L)  // Find index of highest probability token
+5: mask[topIdx] ← False  // Always keep highest probability token
+6: L[mask] ← -∞  // Filter out tokens above surprisal threshold
+7: // At this point, token selection would occur using the filtered logits
+
+// Phase 2: Update mu based on selected token (performed after token selection)
+8: t ← SelectedToken  // Token chosen after filtering
+9: St ← -LogProb(t) / log(2)  // Surprisal of selected token in bits
+10: μnew ← μ - η × (St - τ)  // Update mu using control equation
+11: StoreForNextStep(μnew)  // Save updated mu for next token generation
+12: return L
+
+Dynamic Temperature Sampling
+
+This method adjusts the temperature value based on the entropy (uncertainty) of the current token distribution. When the model is very certain about what comes next (low entropy), it uses a higher temperature to introduce more diversity. When the model is already uncertain (high entropy), it uses a lower temperature to keep the output more focused and coherent. You simply set a minimum and maximum temperature, then an exponent that controls how quickly it transitions between them based on the context's entropy, and the sampler will do the rest.
+
+Technical:
+Dynatemp automatically adjusts the temp param based on the normalized entropy of the prob distribution. We calculate the probability distribution and compute its entropy, which measures how spread out or concentrated the probabilities are.
+
+This entropy is then normalized by dividing the maximum possible entropy (log of the number of tokens with finite logits). This gives us a value between 0 and 1, where 0 represents minimum entropy and 1 represents maximum entropy. The normalized entropy is raised to a power controlled by the exponent parameter, allowing for non-linear mapping between entropy and temperature. This transformed value is then used to interpolate between the min and max temp settings:
+
+temperature = min_temp + (max_temp - min_temp) * (normalized_entropy ^ exponent)
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+
+	
+
+Algorithm 18 Dynamic Temperature Sampling
+Required: Logits tensor L, minimum temperature Tmin, maximum temperature Tmax, exponent α
+Output: Temperature value T dynamically calculated based on distribution entropy
+1: P ← softmax(L)  // Calculate probability distribution
+2: H ← -∑(P · log(P))  // Calculate entropy of the distribution
+3: Vvalid ← |{l ∈ L | l > -∞}|  // Count tokens with finite logits
+4: Hmax ← log(Vvalid)  // Maximum possible entropy
+5: Hnorm ← H / Hmax  // Normalize entropy to range [0,1]
+6: Htrans ← Hnorm^α  // Apply non-linear transformation based on exponent
+7: T ← Tmin + (Tmax - Tmin) · Htrans  // Interpolate between min and max temperature
+8: T ← max(T, ε)  // Ensure temperature is within valid bounds
+9: return T
+
+Beam Search
+
+Beam search is like exploring multiple paths on a map simultaneously to find the best overall route. Instead of making a single choice at each step and hoping it leads to a good outcome (as in greedy, i.e. 0 temperature, or random sampling, i.e. every other sampling method described here), beam search maintains multiple "parallel universes" of text generation and continuously evaluates which ones are most promising. Imagine you're writing a story and reach a point where you could continue in several different ways. Rather than committing to just one direction, beam search would explore, say, the top 5 continuations simultaneously. At the next decision point, it'd consider possible continuations for all 5 paths, then keep only the 5 best paths overall. This process repeats until the generation is complete.
+
+Beam search isn't used much anymore, because it's expensive, and there are better sampling methods out there.
+
+Technical:
+Beam search maintains and expands a fixed number of candidate sequences (the beam width) at each decoding step, selecting the overall most probable sequences.
+We implement it in two phases: the prompt phase, and the generation phase. When processing the initial prompt, we simply select the top 2k (twice the beam width) most likely tokens from the probability distribution. This creates our initial set of candidate sequences. Then in the next phase, during ongoing generation, we take each of the current beam sequences and their accumulated logprobs, add the logprobs of each possible next token to create combined scores, flatten these scores across all beam sequences and vocabs, select the top 2k combinations of (parent sequence, next token), and then finally extract the parent indices and next token IDs from these combinations.
+
+Typically, we sample twice the beam width candidates at each step to ensure enough valid candidates remain after filtering out completed sequence. This approach was popularized by Google's Tensor2Tensor library and is now the standard. Mathematically, beam search chooses the k sequences with the highest scores, where the score for a sequence is the sum of logprobs of all tokens in that sequence. This maximizes the joint probability of the entire sequence rather than making locally optimal choices at each step, which is what greedy decoding does.
+
+Unlike random sampling, beam search is deterministic and will always produce the same output given the same input (assuming ties are broken consistently).
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+
+	
+
+Algorithm 19 Beam Search Sampling
+Required: Input sequence(s), beam width k, vocabulary size V, language model LM
+Output: Top k most likely sequence continuations
+
+// Phase 1: Initialization
+1: Initialize empty beam B = []
+2: Initialize first sequence with empty text and score 0
+
+// Phase 2: Prompt Processing
+3: logprobs ← LM(prompt)  // Get logprobs for next token given prompt
+4: candidates ← []
+5: // Select 2k tokens to ensure enough valid candidates remain
+6: tokens, scores ← TopK(logprobs, 2k)
+7: for each token t, score s in (tokens, scores) do
+8:     candidates.append((prompt + t, s, 0))  // (sequence, score, parent_idx)
+9: end for
+10: Sort candidates by score (descending)
+11: B ← candidates[:k]  // Keep top k candidates
+
+// Phase 3: Generation Phase
+12: for each decoding step do
+13:     candidates ← []
+14:     // For each sequence in the beam
+15:     for i from 0 to |B|-1 do
+16:         seq, cum_score, _ ← B[i]
+17:         logprobs ← LM(seq)  // Get logprobs for next token given sequence
+18:         // Add cumulative score to current logprobs
+19:         full_scores ← logprobs + cum_score
+20:         // Flatten scores across all beam sequences and vocabulary
+21:         all_scores.append(full_scores)
+22:     end for
+23:
+24:     // Select 2k highest scoring (sequence, next_token) combinations
+25:     flat_scores ← Flatten(all_scores)  // Size: (beam_width × vocab_size)
+26:     top_indices, top_scores ← TopK(flat_scores, 2k)
+27:
+28:     // Extract parent sequence index and token id from flat indices
+29:     for each idx, score in (top_indices, top_scores) do
+30:         parent_idx ← idx ÷ V  // Integer division
+31:         token_id ← idx mod V
+32:         parent_seq, parent_score, _ ← B[parent_idx]
+33:         candidates.append((parent_seq + token_id, score, parent_idx))
+34:     end for
+35:
+36:     // Handle completed sequences separately (if needed)
+37:     ... 
+38:
+39:     // Update beam with top k candidates
+40:     Sort candidates by score (descending)
+41:     B ← candidates[:k]
+42:
+43:     if stopping_criteria_met then
+44:         break
+45:     end if
+46: end for
+
+47: return B  // Return top k sequences
+
+Contrastive Search
+
+When choosing the next word, CS balances two competing goals: picking words that make sense in context (high probability) while avoiding repetivie patterns (low similarity to what's already been written). Similar to beam search, this sampling method is not widely used anymore.
+
+CS was invented to address a fundamental limitation of likelihood-based sampling: the tendency to either be too repetitive (at low temps) or too incoherent (at high temps). Instead of just adjusting randomness, it explicitly rewards diversity.
+
+Technical:
+CS introduces a degeneration penalty based on the similarity between candidate tokens and the existing context. We first select top-k most probable tokens based on logits. Then, extract vector representations of the existing context and each candidate continuation from the model's hidden states. For each candidate token, calculate a score that balances: 1) its probability (how likely it is according to the model), 2) its degeneration penalty (how similar it is to the existing context). The alpha parameter controls the trade-off between likelihood and diversity.
+
+Mathematically, it is:
+score(x) = α * P(x) - (1-α) * sim(x, context)
+
+Where:
+
+    P(x) is the probability of token x
+    sim(x, context) is the semantic similarity between x and the context
+    α is the balancing coefficient.
+
+Algorithm
+
+ 1
+ 2
+ 3
+ 4
+ 5
+ 6
+ 7
+ 8
+ 9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+
+	
+
+Algorithm 20 Contrastive Search
+Required: Input prompt, model M, top-k parameter k, alpha parameter α ∈ [0,1]
+Output: Generated text that balances likelihood and diversity
+
+1: seq ← prompt  // Initialize with input prompt
+2:
+3: for each decoding step do
+4:     // Get logits from the model for next token
+5:     logits ← M(seq)
+6:
+7:     // Get top-k most likely tokens
+8:     topk_logits, topk_indices ← TopK(logits, k)
+9:
+10:     // Convert to probabilities
+11:     topk_probs ← Softmax(topk_logits)
+12:
+13:     // Get hidden representations from the model's last layer
+14:     H ← GetHiddenStates(M, seq)
+15:     h_last ← H[-1]  // Hidden state for the last token
+16:
+17:     // Calculate degeneration penalty for each candidate token
+18:     penalties ← []
+19:     for each candidate token t in topk_indices do
+20:         // Get hidden representation if we were to append this token
+21:         h_candidate ← GetHiddenState(M, seq + t)[-1]
+22:
+23:         // Calculate similarity between candidate and context
+24:         sim ← CosineSimilarity(h_candidate, h_last)
+25:
+26:         // Store similarity as the degeneration penalty
+27:         penalties.append(sim)
+28:     end for
+29:
+30:     // Calculate final scores using weighted combination
+31:     // Higher alpha weights likelihood more, lower alpha weights diversity more
+32:     scores ← α * topk_probs - (1-α) * penalties
+33:
+34:     // Select token with highest combined score
+35:     best_idx ← ArgMax(scores)
+36:     next_token ← topk_indices[best_idx]
+37:
+38:     // Append to sequence
+39:     seq ← seq + next_token
+40:
+41:     if stopping_criteria_met then
+42:         break
+43:     end if
+44: end for
+45:
+46: return seq
+
+Sampler Order
+
+The document thus far has explained individual sampling methods, but in real-world LLM implementations, these techniques are often applied in a carefully orchestrated sequence. Some libraries allow for the user to customize the order of samplers per-request, but most do not.
+The Typical Sampling Pipeline
+
+A typical sampling pipeline in production LLM systems follow these sequential steps:
+
+    Generate Raw Logits: The model produces unnormalized logits for each token in the vocabulary.
+    Apply Token Filtering/Banning: Remove tokens that shouldn't be considred at all.
+    Apply Penalties: Apply repetition, frequency, and presence penalties to discourage repetitive outputs.
+    Apply Pattern-Based Techniques: Methods like DRY (Don't Repeat Yourself) are applied to identify and penalize repetitive patterns.
+    Apply Temperature Scaling: Temperature is either applied as the first or the last sampler (outside penalties and post-softmax samplers), depending on the implementation. For most tasks, temperature is applied first. For creative writing, it is usually last.
+    Apply Distribution-Shaping Methods: Techniques like Top-K, Top-P, Min-P, etc. that filter or reshape the probability distribution.
+    Sample from the Final Distribution: After all modifications, select a token from the resulting probability distribution.
+
+Effects and Interactions of Samplers with Each Other
+
+The order in which sampling techniques are applied have serious implications for text generation. This is an oft-unexplored topic, and libraries usually follow a somewhat standardized order without any flexibility. Each sampler modifies the probability distribution, creating a transformed landscape that subsequent samplers work with. Understanding these is very crucial.
+How Samplers Transform Distributions
+
+To understand sampler interaction, let's first visualize it:
+
+    Original Distribution: A typical token distribution has a few high-probability tokens followed by a long tail of increasingly unlikely options.
+    After Penalties: Penalties flatten peaks for previously used tokens, so they elevate alternatives that haven't appeared yet.
+    After Temperature: Lower temperatures (<1.0) sharpen the distribution, making peaks higher and valleys lower. Higher temperatures (>1.0) flatten the distribution.
+    After Filtering (Top-K/P/etc.): These truncate the distribution, removing lowest-probability tokens and often renormalizing the remaining probs.
+
+Each transformation, as you may guess, fundamentally changes what subsequent samplers see and can dramatically influence the final output.
+Critical Order-Dependent Interactions
+Temperature Before vs. After Filtering
+
+One of the most important ordering decisions is whether to apply temperature scaling before or after filtering methods:
+
+Temperature → Filtering:
+
+    Temperature first reshapes the entire distribution
+    Low temperature concentrates probability mass on fewer tokens before filtering
+    High temperature spreads probability mass more evenly before filtering
+    Filtering then operates on this reshaped distribution
+
+Filtering → Temperature:
+
+    Filtering first truncates the distribution to only the most likely tokens
+    Temperature then only affects the relative probabilities among these filtered tokens
+    Can produce more constrained outputs even with high temperatures
+
+Example: With a Top-K of 40 and temperature of 1.5, applying temperature first might allow some tokens from outside the original top 40 to become likely enough to survive filtering. Applying filtering first ensures only the original top 40 tokens remain, regardless of temperature.
+Penalties Before vs. After Other Samplers
+
+Penalties → Temperature:
+
+    Penalties first reduce probabilities of repeated tokens
+    Temperature then amplifies or diminishes these adjustments
+    With high temperatures, penalties may be effectively erased
+    With low temperatures, penalties may be excessively amplified
+
+Temperature → Penalties:
+
+    Temperature first reshapes the entire distribution
+    Penalties then operate on this temperature-modified distribution
+    Can lead to more balanced and predictable penalty effects
+
+DRY's Position Matters
+
+The DRY (Don't Repeat Yourself) sampler, which penalizes continuing n-gram patterns, is particularly sensitive to positioning:
+
+DRY Early in Pipeline:
+
+    Applied to the raw or lightly modified distribution
+    Has strong effect on preventing repetition
+    Subsequent samplers may still introduce repetition by elevating penalized tokens
+
+DRY Late in Pipeline:
+
+    Applied after other samplers have modified the distribution
+    May have weaker effect if previous samplers have already eliminated some options
+    Final arbiter against repetition before token selection
+
+Synergies and Conflicts
+Synergistic Combos
+
+    Top-K + Top-P: Top-K provides a hard limit on tokens considered, while Top-P adapts to the confidence of the model. Together they give us guardrails and enough flexibility.
+    Temperature + Min-P: High temperature flattens the distribution, while Min-P establishes a quality floor relative to the best token. This combination increases creativity while filtering out truly poor options.
+
+Conflicting Combos
+
+    High Temperature + Low Top-K: High temperature tries to flatten the distribution, while low Top-K severely restricts options. The Top-K will essentially override much of the temperature's effect.
+    Multiple Filtering Methods: Applying Top-K, Top-P, Min-P, and TFS together often results in the most restrictive one dominating, making the others redundant.
+    XTC + Top-A: Both methods aim to exclude top choices but in different ways. Using both can overly restrict the sampling space.

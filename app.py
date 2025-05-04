@@ -5,7 +5,7 @@ corpus = build_corpus("data/")
 print(f"total chunks: {len(corpus)}") #log chunks
 build_faiss_index(corpus)
 
-query = "What rough beast slouches towards Bethlehem?"
+query = "What is temperature sampling?"
 results = search(query, k=3)
 
 for r in results:
